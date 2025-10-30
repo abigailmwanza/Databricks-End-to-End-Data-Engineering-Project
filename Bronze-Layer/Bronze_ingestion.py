@@ -1,0 +1,81 @@
+"""
+Bronze Layer Incremental Data Ingestion Script
+---------------------------------------------
+This script uses Databricks Auto Loader to incrementally ingest CSV data 
+from the raw layer into the bronze layer as Delta tables.
+
+Steps:
+1. Define source datasets.
+2. Use Databricks widgets to set the current source.
+3. Read data incrementally using Auto Loader.
+4. Write results to the Bronze Delta Lake.
+5. Wait for the streaming job to complete.
+"""
+
+# -------------------------------------------------
+# STEP 1: Define Source Tables for Ingestion
+# -------------------------------------------------
+# List of source data folders to process
+src_array = [
+    {"src": "bookings"},
+    {"src": "airports"},
+    {"src": "customers"},
+    {"src": "flights"}
+]
+
+# Store the list in Databricks job task values for cross-task access
+dbutils.jobs.taskValues.set(key="output_key", value=src_array)
+
+# -------------------------------------------------
+# STEP 2: Setup for Incremental Data Ingestion
+# -------------------------------------------------
+# Create a Databricks text widget to accept the source name dynamically
+dbutils.widgets.text("src", "")
+src_value = dbutils.widgets.get("src")
+
+# Display current source (for debugging or job logs)
+print(f"Processing source: {src_value}")
+
+# -------------------------------------------------
+# STEP 3: Read Data Incrementally using Auto Loader
+# -------------------------------------------------
+# Load new files as they arrive from the raw layer
+df = (
+    spark.readStream
+    .format("cloudFiles")  # Use Auto Loader
+    .option("cloudFiles.format", "csv")  # Specify input format
+    .option(
+        "cloudFiles.schemaLocation",
+        f"/Volumes/workspace/bronze/bronzevolume/{src_value}/checkpoint"
+    )  # Path to store schema information
+    .option("cloudFiles.schemaEvolutionMode", "rescue")  # Handle schema drift gracefully
+    .load(f"/Volumes/workspace/raw/rawvolume/rawdata/{src_value}/")  # Source path
+)
+
+# -------------------------------------------------
+# STEP 4: Write Data to Bronze Layer in Delta Format
+# -------------------------------------------------
+# Stream processed data into Delta tables for reliability and ACID compliance
+stream = (
+    df.writeStream
+    .format("delta")  # Delta format ensures transactional integrity
+    .outputMode("append")  # Append new incremental data
+    .trigger(once=True)  # Run one batch and stop
+    .option(
+        "checkpointLocation",
+        f"/Volumes/workspace/bronze/bronzevolume/{src_value}/checkpoint"
+    )  # Track processed files for fault tolerance
+    .option(
+        "path",
+        f"/Volumes/workspace/bronze/bronzevolume/{src_value}"
+    )  # Destination path for Bronze Delta table
+    .start()
+)
+
+# -------------------------------------------------
+# STEP 5: Wait for Stream Completion
+# -------------------------------------------------
+# Block execution until the streaming job is finished
+stream.awaitTermination()
+
+print(f"✅ Ingestion completed successfully for: {src_value}")
